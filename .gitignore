@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv-train/
+.venv-cloud/
+data/cache/
+data/llm_cache/
+models/*.pt
+models/*.json
+models/llm/
+results/*.csv
+results/*.json
+results/*.md
+.DS_Store
