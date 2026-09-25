@@ -1,0 +1,63 @@
+{
+  "stacking": {
+    "accuracy": 0.6452,
+    "auc": 0.4818,
+    "n_samples": 31,
+    "positive_ratio": 0.3548,
+    "confusion_matrix": {
+      "tn": 20,
+      "fp": 0,
+      "fn": 11,
+      "tp": 0
+    }
+  },
+  "dynamic": {
+    "accuracy": 0.6452,
+    "auc": 0.5909,
+    "n_samples": 31,
+    "positive_ratio": 0.3548,
+    "confusion_matrix": {
+      "tn": 17,
+      "fp": 3,
+      "fn": 8,
+      "tp": 3
+    }
+  },
+  "weights": {
+    "xgb": 0.8234003782272339,
+    "lstm": 0.09646134823560715,
+    "transformer": 0.08013837039470673
+  },
+  "compare": [
+    {
+      "模型": "xgb",
+      "accuracy": 0.4516,
+      "auc": 0.5182
+    },
+    {
+      "模型": "lstm",
+      "accuracy": 0.6452,
+      "auc": 0.5
+    },
+    {
+      "模型": "transformer",
+      "accuracy": 0.6452,
+      "auc": 0.45
+    },
+    {
+      "模型": "等权平均",
+      "accuracy": 0.4516,
+      "auc": 0.5136
+    },
+    {
+      "模型": "Stacking融合",
+      "accuracy": 0.6452,
+      "auc": 0.4818
+    },
+    {
+      "模型": "动态权重融合",
+      "accuracy": 0.6452,
+      "auc": 0.5909
+    }
+  ]
+}

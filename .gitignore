@@ -7,7 +7,6 @@ data/llm_cache/
 models/*.pt
 models/*.json
 models/llm/
-results/*.csv
-results/*.json
 results/*.md
+# 云端部署分支需要提交训练好的预测文件（预测 CSV 与指标 JSON）
 .DS_Store
