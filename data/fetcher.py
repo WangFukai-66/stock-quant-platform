@@ -410,7 +410,7 @@ def fetch_stock_names() -> dict[str, str]:
 
     接口失败时优先使用过期缓存兜底（股票代码表相对稳定），
     仍无数据则返回空字典，调用方应退化为仅做格式校验。
-    （云端增量拉取偶发文件不同步，此行注释兼作强制刷新标记 v3）
+    （云端增量拉取偶发文件不同步，此行注释兼作强制刷新标记 v4）
     """
     path = _cache_path("stock_names", "all")
     cached = _read_cache(path)
