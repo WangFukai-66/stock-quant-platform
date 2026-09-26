@@ -102,6 +102,18 @@ def _read_cache(path: Path) -> pd.DataFrame | None:
     return None
 
 
+def _read_cache_stale(path: Path) -> pd.DataFrame | None:
+    """不检查 TTL 直接读缓存（用于刷新失败时的过期数据兜底）。"""
+    if path.exists():
+        try:
+            df = pd.read_parquet(path)
+            logger.info("使用过期缓存兜底 %s (%d 行)", path.name, len(df))
+            return df
+        except Exception as exc:
+            logger.warning("过期缓存读取失败(%s): %s", path.name, exc)
+    return None
+
+
 def _write_cache(path: Path, df: pd.DataFrame) -> None:
     if df is not None and not df.empty:
         df.to_parquet(path, index=False)
@@ -396,8 +408,9 @@ def fetch_news(symbol: str) -> pd.DataFrame:
 def fetch_stock_names() -> dict[str, str]:
     """全市场 A 股代码 → 名称映射（用于看板输入校验与名称显示）。
 
-    接口失败返回空字典，调用方应退化为仅做格式校验。
-    （云端增量拉取偶发文件不同步，此行注释兼作强制刷新标记 v2）
+    接口失败时优先使用过期缓存兜底（股票代码表相对稳定），
+    仍无数据则返回空字典，调用方应退化为仅做格式校验。
+    （云端增量拉取偶发文件不同步，此行注释兼作强制刷新标记 v3）
     """
     path = _cache_path("stock_names", "all")
     cached = _read_cache(path)
@@ -408,9 +421,15 @@ def fetch_stock_names() -> dict[str, str]:
     try:
         raw = _retry(ak.stock_info_a_code_name, retries=1)
     except Exception as exc:
-        logger.warning("股票列表接口失败(%s)，仅做格式校验", exc)
+        logger.warning("股票列表接口失败(%s)，尝试过期缓存兜底", exc)
+        stale = _read_cache_stale(path)
+        if stale is not None and "代码" in stale.columns:
+            return dict(zip(stale["代码"].astype(str).str.zfill(6), stale["名称"].astype(str)))
         return {}
     if raw is None or raw.empty:
+        stale = _read_cache_stale(path)
+        if stale is not None and "代码" in stale.columns:
+            return dict(zip(stale["代码"].astype(str).str.zfill(6), stale["名称"].astype(str)))
         return {}
     df = pd.DataFrame(raw)
     if "code" in df.columns and "name" in df.columns:
