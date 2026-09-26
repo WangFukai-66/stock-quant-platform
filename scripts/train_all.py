@@ -1,7 +1,8 @@
 """训练全部模型（XGBoost + LSTM + Transformer）并执行 Stacking / 动态权重融合。
 
-用法: python scripts/train_all.py --symbol 600519 [--epochs 30]
-输出: results/ 下各模型指标与融合对比表、test 集预测
+用法: python -m scripts.train_all --symbol 600519 [--epochs 30]
+输出: results/ 下各模型指标与融合对比表、test 集预测（文件名带股票代码后缀，
+如 fusion_predictions_600519.csv，供看板按标的读取，避免不同股票预测张冠李戴）
 """
 from __future__ import annotations
 
@@ -49,7 +50,7 @@ def main():
     test_probs["xgb"] = xgb.predict_proba(test).values[test_mask]
     xgb.save()
     save_predictions(test["日期"].values, test["label"].values, xgb.predict_proba(test).values,
-                     test["收盘"].values, RESULTS_DIR / "xgb_predictions.csv")
+                     test["收盘"].values, RESULTS_DIR / f"xgb_predictions_{args.symbol}.csv")
 
     # ---- LSTM ----
     print("\n[2/3] LSTM")
@@ -58,7 +59,7 @@ def main():
     val_probs["lstm"] = lstm_prob(lstm, x_va)
     test_probs["lstm"] = lstm_prob(lstm, x_te)
     save_predictions(d_te, y_te, test_probs["lstm"], c_te,
-                     RESULTS_DIR / "lstm_predictions.csv")
+                     RESULTS_DIR / f"lstm_predictions_{args.symbol}.csv")
 
     # ---- Transformer ----
     print("\n[3/3] Transformer")
@@ -67,7 +68,7 @@ def main():
     val_probs["transformer"] = tf_prob(tf, x_va)
     test_probs["transformer"] = tf_prob(tf, x_te)
     save_predictions(d_te, y_te, test_probs["transformer"], c_te,
-                     RESULTS_DIR / "transformer_predictions.csv")
+                     RESULTS_DIR / f"transformer_predictions_{args.symbol}.csv")
 
     # ---- 融合 ----
     print("\n[融合] Stacking + 动态权重")
@@ -81,7 +82,7 @@ def main():
     from models.fusion import StackingFusion
     fusion = StackingFusion().fit(val_probs, val["label"].values[val_mask])
     fused = fusion.predict_proba(test_probs)
-    save_predictions(d_te, y_te, fused, c_te, RESULTS_DIR / "fusion_predictions.csv")
+    save_predictions(d_te, y_te, fused, c_te, RESULTS_DIR / f"fusion_predictions_{args.symbol}.csv")
     print("\n全部完成，启动看板: streamlit run app/main.py")
 
 
