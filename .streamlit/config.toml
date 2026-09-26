@@ -1,0 +1,8 @@
+# Streamlit 主题配置：白色清爽风 + 中国红点缀
+[theme]
+base = "light"
+primaryColor = "#e64545"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f7f9"
+textColor = "#1f2329"
+font = "sans serif"
