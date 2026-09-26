@@ -334,6 +334,8 @@ def main():
     names = load_stock_names()
     if symbol in names:
         st.sidebar.caption(f"**{names[symbol]}**")
+    elif symbol == DEFAULT_SYMBOL:
+        st.sidebar.caption(f"**{DEFAULT_NAME}**")
     elif names:
         st.sidebar.error(f"股票代码 {symbol} 不存在，请检查后重新输入")
         st.stop()
