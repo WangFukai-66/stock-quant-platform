@@ -20,7 +20,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from alert.rules import generate_signals, latest_signals, position_advice
 from backtest.engine import BacktestEngine, BacktestConfig
-from data.fetcher import fetch_news, fetch_stock_names
+from data.fetcher import fetch_news
+
+# 云端增量拉取偶发文件不同步：fetch_stock_names 缺失时降级为仅格式校验，避免应用崩溃
+try:
+    from data.fetcher import fetch_stock_names
+except ImportError:
+    fetch_stock_names = None
 from data.finance import get_financial_metrics
 from data.quote import get_history
 from factors.indicators import add_all_indicators
@@ -57,6 +63,8 @@ def load_financial(symbol: str):
 @st.cache_data(ttl=86400)
 def load_stock_names() -> dict:
     """全市场股票代码→名称映射（用于输入校验与名称显示，失败返回空字典）。"""
+    if fetch_stock_names is None:
+        return {}
     return fetch_stock_names()
 
 
