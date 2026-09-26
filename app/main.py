@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -113,6 +117,210 @@ def trained_hint(symbol: str) -> str:
     """未训练标的的统一提示文案。"""
     return (f"股票 {symbol} 暂无模型预测。当前已训练标的：{DEFAULT_SYMBOL} {DEFAULT_NAME}。"
             f"本地训练命令：python -m scripts.train_all --symbol {symbol}")
+
+
+# ---------------------------------------------------------------- 后台训练 ----
+
+QUEUE_PATH = PROJECT_ROOT / "results" / "train_queue.json"
+SYNC_STATE_PATH = PROJECT_ROOT / "results" / ".sync_state.json"
+
+
+def venv_train_python() -> str | None:
+    """本地训练解释器（.venv-train，云端仓库无此目录）。"""
+    p = PROJECT_ROOT / ".venv-train" / "bin" / "python"
+    return str(p) if p.exists() else None
+
+
+def train_available() -> bool:
+    """后台训练是否可用（仅本地：有 .venv-train 或当前进程自带 torch）。"""
+    if venv_train_python() is not None:
+        return True
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except Exception:
+        return False
+
+
+def train_python() -> str | None:
+    """训练子进程的解释器（云端为 None）。"""
+    if venv_train_python() is not None:
+        return venv_train_python()
+    try:
+        if importlib.util.find_spec("torch") is not None:
+            return sys.executable
+    except Exception:
+        pass
+    return None
+
+
+def _read_json(path: Path, default=None):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _write_json(path: Path, obj) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def status_path_of(symbol: str) -> Path:
+    return PROJECT_ROOT / "results" / f"training_{symbol}.json"
+
+
+def log_path_of(symbol: str) -> Path:
+    return PROJECT_ROOT / "results" / f"train_log_{symbol}.log"
+
+
+def read_training_status(symbol: str) -> dict:
+    """读取单支训练状态；running 但进程已死 → 标记 error（防看板重启后死锁）。"""
+    stt = _read_json(status_path_of(symbol)) or {}
+    if stt.get("status") == "running" and stt.get("pid"):
+        try:
+            os.kill(int(stt["pid"]), 0)
+        except OSError:
+            stt = {**stt, "status": "error", "error": "训练进程意外退出（看板已重启？）"}
+            _write_json(status_path_of(symbol), stt)
+    return stt
+
+
+def tail_of(path: Path, n: int = 6) -> str:
+    """日志尾部 n 行（文件不存在/读取失败返回空串）。"""
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="ignore").splitlines()[-n:])
+    except Exception:
+        return ""
+
+
+def read_queue() -> dict | None:
+    return _read_json(QUEUE_PATH)
+
+
+def start_training(symbol: str, quick: bool) -> dict:
+    """后台子进程启动单支训练（stdout 重定向到日志文件）。"""
+    py = train_python()
+    if py is None:
+        return {"ok": False, "error": "未检测到本地训练环境（.venv-train）"}
+    log = log_path_of(symbol)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "w", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            [py, "-m", "scripts.train_all", "--symbol", symbol,
+             "--status", str(status_path_of(symbol)),
+             *(["--quick"] if quick else [])],
+            cwd=str(PROJECT_ROOT), stdout=f, stderr=subprocess.STDOUT)
+    return {"ok": True, "pid": proc.pid}
+
+
+def start_queue(symbols: list[str], quick: bool) -> dict:
+    """启动串行训练队列；已有队列在跑时拒绝（全局互斥）。"""
+    q = read_queue()
+    if q and q.get("status") == "running":
+        return {"ok": False, "error": f"已有训练队列在运行（{q['queue'][q['index']]}），请等待完成"}
+    queue = {"queue": symbols, "index": 0,
+             "mode": "quick" if quick else "standard",
+             "status": "running", "failures": {},
+             "started_at": time.time()}
+    r = start_training(symbols[0], quick)
+    if r["ok"]:
+        queue["pid"] = r["pid"]
+    else:
+        queue["status"] = "error"
+        queue["error"] = r["error"]
+    _write_json(QUEUE_PATH, queue)
+    return {"ok": True, "queue": queue}
+
+
+def _advance_queue(q: dict) -> dict:
+    """当前支结束后推进队列：启动下一支或标记整体完成。"""
+    symbols, idx = q["queue"], q["index"]
+    if idx + 1 >= len(symbols):
+        q["status"] = "done"
+        q["finished_at"] = time.time()
+        return q
+    nxt = symbols[idx + 1]
+    r = start_training(nxt, q["mode"] == "quick")
+    if not r["ok"]:
+        q["status"] = "error"
+        q["error"] = f"无法启动 {nxt} 训练：{r['error']}"
+        return q
+    q["index"] = idx + 1
+    q["pid"] = r["pid"]
+    return q
+
+
+def drive_queue() -> dict | None:
+    """队列调度（在进度 fragment 中周期调用）：收尾已完成支、启动下一支。"""
+    q = read_queue()
+    if not q or q.get("status") != "running":
+        return q
+    while True:
+        idx = q["index"]
+        if idx >= len(q["queue"]):
+            q["status"] = "done"
+            q["finished_at"] = time.time()
+            break
+        cur = q["queue"][idx]
+        s = read_training_status(cur).get("status")
+        if s == "running" or s is None:
+            break                      # 当前支仍在训练（或状态未落盘），等待
+        if s == "error":
+            q["failures"][cur] = read_training_status(cur).get("error") or "训练失败（详见日志）"
+        q = _advance_queue(q)
+        if q["status"] != "running":
+            break
+    _write_json(QUEUE_PATH, q)
+    return q
+
+
+def on_queue_done(q: dict) -> bool:
+    """队列完成时清预测缓存并请求整页刷新（幂等，返回是否需要 rerun）。"""
+    qid = q.get("started_at")
+    if st.session_state.get("_cleared_queue") == qid:
+        return False
+    load_prediction.clear()
+    st.session_state["_cleared_queue"] = qid
+    return True
+
+
+def scan_trained_symbols() -> list[str]:
+    """扫描已训练股票（带后缀预测文件；无后缀旧文件视为默认标的）。"""
+    symbols: list[str] = []
+    results = PROJECT_ROOT / "results"
+    for p in sorted(results.glob("fusion_predictions_*.csv")):
+        m = re.fullmatch(r"fusion_predictions_(\d{6})\.csv", p.name)
+        if m and m.group(1) not in symbols:
+            symbols.append(m.group(1))
+    if (results / "fusion_predictions.csv").exists() and DEFAULT_SYMBOL not in symbols:
+        symbols.append(DEFAULT_SYMBOL)
+    return symbols
+
+
+def _max_product_mtime(symbol: str) -> float:
+    """该股票预测/指标产物的最新修改时间（判断是否待同步）。"""
+    newest = 0.0
+    results = PROJECT_ROOT / "results"
+    for name in ("fusion", "xgb", "lstm", "transformer"):
+        for kind in ("predictions", "metrics"):
+            ext = ".csv" if kind == "predictions" else ".json"
+            p = results / f"{name}_{kind}_{symbol}{ext}"
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                pass
+    return newest
+
+
+def load_sync_state() -> dict:
+    return _read_json(SYNC_STATE_PATH, {}) or {}
+
+
+def pending_sync_symbols(trained: list[str]) -> list[str]:
+    """待同步 = 已训练且产物比上次同步更新（或从未同步）。"""
+    state = load_sync_state()
+    return [s for s in trained
+            if s not in state or _max_product_mtime(s) > float(state[s].get("mtime", 0))]
 
 
 # ---------------------------------------------------------------- 图表 ----
@@ -321,6 +529,137 @@ def page_alert(symbol: str):
     st.dataframe(sig.tail(30), width='stretch')
 
 
+def page_admin():
+    st.header("后台管理（仅本地环境显示）")
+    st.caption("训练在后台执行，可切换到其他页签使用；云端用户看不到本页签。")
+
+    # ---- 已训练股票状态表 ----
+    st.subheader("已训练股票")
+    trained = scan_trained_symbols()
+    state = load_sync_state()
+    pending = pending_sync_symbols(trained)
+    if not trained:
+        st.info("暂无已训练股票（默认标的 600519 的无后缀旧版预测也算已训练）")
+    else:
+        rows = [{"股票代码": s,
+                 "同步状态": "已同步云端" if s not in pending else "仅本地",
+                 "上次同步": state.get(s, {}).get("time", "-")}
+                for s in sorted(trained)]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    # ---- 批量训练 ----
+    st.subheader("批量训练")
+    admin_training_fragment()
+    q = read_queue()
+    if not q or q.get("status") != "running":
+        codes = st.text_area("输入股票代码（6 位数字，逗号/空格/换行分隔）",
+                             placeholder="例如：000001, 600036, 601318")
+        mode = st.radio("训练模式", ["快速（约 3~6 分钟/支）", "标准（约 10~15 分钟/支）"],
+                        horizontal=True)
+        if st.button("开始训练", type="primary"):
+            symbols = list(dict.fromkeys(re.findall(r"\d{6}", codes)))
+            if not symbols:
+                st.error("未识别到有效的 6 位股票代码")
+            else:
+                r = start_queue(symbols, quick=mode.startswith("快速"))
+                if r["ok"]:
+                    st.success(f"已启动训练队列：{', '.join(symbols)}")
+                    st.rerun()
+                else:
+                    st.error(r["error"])
+
+    st.divider()
+
+    # ---- 同步云端 ----
+    st.subheader("同步云端")
+    trained = scan_trained_symbols()
+    pending = pending_sync_symbols(trained)
+    if not pending:
+        st.success("所有已训练股票均已同步云端（云端重建需几分钟后可见）")
+    else:
+        st.info("待同步股票：" + ", ".join(sorted(pending)))
+        confirm = st.checkbox("我已确认：仅提交上述股票的预测/指标文件到 cloud 分支，不触碰其他文件")
+        if st.button("一键同步云端", type="primary"):
+            if not confirm:
+                st.error("请先勾选确认")
+            else:
+                with st.spinner("执行安全同步中（add → commit → push）..."):
+                    r = subprocess.run(
+                        [sys.executable, "-m", "scripts.sync_cloud", ",".join(pending)],
+                        cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=300)
+                try:
+                    res = json.loads(r.stdout.strip().splitlines()[-1])
+                except Exception:
+                    res = {"ok": False, "error": r.stdout.strip() or r.stderr.strip()}
+                if res.get("ok"):
+                    st.success(f"同步成功（commit {res.get('commit')}）。"
+                               f"Streamlit Cloud 自动重建中，几分钟后云端可见。")
+                else:
+                    st.error("同步失败：" + str(res.get("error")))
+
+
+# ---------------------------------------------------------------- 侧边栏进度 ----
+
+def _sidebar_training_widget_body():
+    """侧边栏底部训练进度（局部自动刷新，不影响其他页签功能）。"""
+    q = drive_queue()
+    if not q:
+        return
+    if q.get("status") == "running":
+        symbols = q["queue"]
+        idx = q["index"]
+        cur = symbols[idx]
+        stt = read_training_status(cur)
+        st.sidebar.progress(int(stt.get("progress", 0)) / 100,
+                            text=f"训练 {cur}（{idx + 1}/{len(symbols)}）")
+        log = tail_of(log_path_of(cur), 3)
+        if log:
+            st.sidebar.caption(log)
+    elif q.get("status") == "done":
+        if on_queue_done(q):
+            st.rerun()
+
+
+def _admin_training_fragment_body():
+    """后台管理页训练进度区（局部自动刷新）。"""
+    q = drive_queue()
+    if not q:
+        return
+    if q.get("status") == "running":
+        symbols = q["queue"]
+        idx = q["index"]
+        cur = symbols[idx]
+        stt = read_training_status(cur)
+        st.progress(int(stt.get("progress", 0)) / 100,
+                    text=f"正在训练 {cur}（第 {idx + 1}/{len(symbols)} 支，{q['mode']} 模式）")
+        log = tail_of(log_path_of(cur), 8)
+        if log:
+            st.code(log)
+        failures = q.get("failures") or {}
+        if failures:
+            st.warning("已失败：" + "；".join(f"{k}: {v}" for k, v in failures.items()))
+    elif q.get("status") == "done":
+        failures = q.get("failures") or {}
+        if failures:
+            st.warning("队列完成，部分失败：" + "；".join(f"{k}: {v}" for k, v in failures.items()))
+        else:
+            st.success(f"队列训练完成：{', '.join(q['queue'])}")
+    elif q.get("status") == "error":
+        st.error(q.get("error") or "训练队列执行出错")
+
+
+# 旧版 Streamlit 无 fragment 时降级为普通渲染（进度靠手动刷新）
+if hasattr(st, "fragment"):
+    sidebar_training_widget = st.fragment(run_every=3)(_sidebar_training_widget_body)
+    admin_training_fragment = st.fragment(run_every=3)(_admin_training_fragment_body)
+else:
+    def sidebar_training_widget():
+        _sidebar_training_widget_body()
+
+    def admin_training_fragment():
+        _admin_training_fragment_body()
+
+
 # ---------------------------------------------------------------- 主入口 ----
 
 def main():
@@ -357,7 +696,15 @@ def main():
     else:
         use_deep = st.sidebar.checkbox("舆情深度情绪模型（RoBERTa，首次加载较慢）", value=False)
 
-    page = st.sidebar.radio("功能页签", ["概览", "行情", "财报", "舆情", "AI预测", "量化回测", "智能预警"])
+    pages = ["概览", "行情", "财报", "舆情", "AI预测", "量化回测", "智能预警"]
+    if train_available():
+        pages.append("后台管理")
+    page = st.sidebar.radio("功能页签", pages)
+
+    if page == "后台管理":
+        page_admin()
+        sidebar_training_widget()
+        return
 
     with st.spinner("加载数据中..."):
         daily_df = load_indicators(symbol, start)
@@ -389,6 +736,8 @@ def main():
     elif page == "智能预警":
         page_alert(symbol)
 
+    st.sidebar.divider()
+    sidebar_training_widget()
     st.sidebar.divider()
     st.sidebar.caption("本项目仅用于学术研究与技术演示，不构成投资建议。")
 
