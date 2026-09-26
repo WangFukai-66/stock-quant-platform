@@ -397,6 +397,7 @@ def fetch_stock_names() -> dict[str, str]:
     """全市场 A 股代码 → 名称映射（用于看板输入校验与名称显示）。
 
     接口失败返回空字典，调用方应退化为仅做格式校验。
+    （云端增量拉取偶发文件不同步，此行注释兼作强制刷新标记 v2）
     """
     path = _cache_path("stock_names", "all")
     cached = _read_cache(path)
