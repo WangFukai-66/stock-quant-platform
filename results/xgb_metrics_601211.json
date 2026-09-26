@@ -1,0 +1,12 @@
+{
+  "accuracy": 0.5487,
+  "auc": 0.5662,
+  "n_samples": 339,
+  "positive_ratio": 0.4897,
+  "confusion_matrix": {
+    "tn": 150,
+    "fp": 23,
+    "fn": 130,
+    "tp": 36
+  }
+}
