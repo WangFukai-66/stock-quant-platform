@@ -2,7 +2,6 @@ __pycache__/
 *.pyc
 .venv-train/
 .venv-cloud/
-data/cache/
 data/llm_cache/
 models/*.pt
 models/*.json
@@ -10,3 +9,5 @@ models/llm/
 results/*.md
 # 云端部署分支需要提交训练好的预测文件（预测 CSV 与指标 JSON）
 .DS_Store
+data/cache/*
+!data/cache/stock_names_all.parquet
