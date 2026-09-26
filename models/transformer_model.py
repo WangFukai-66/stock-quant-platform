@@ -54,7 +54,9 @@ class TimeSeriesTransformer(nn.Module):
 
 def train_transformer(x_train, y_train, x_val, y_val, epochs: int = 50,
                       batch_size: int = 32, lr: float = 1e-3, patience: int = 5,
-                      model_path: Path | None = None, device=None) -> TimeSeriesTransformer:
+                      model_path: Path | None = None, device=None,
+                      progress_cb=None) -> TimeSeriesTransformer:
+    """progress_cb(epoch, epochs)：每个 epoch 结束回调，用于外部进度展示。"""
     device = device or get_device()
     model = TimeSeriesTransformer(x_train.shape[2]).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -80,6 +82,8 @@ def train_transformer(x_train, y_train, x_val, y_val, epochs: int = 50,
         model.eval()
         with torch.no_grad():
             val_loss = loss_fn(model(xv), yv).item()
+        if progress_cb is not None:
+            progress_cb(epoch, epochs)
         if val_loss < best_val:
             best_val, bad_epochs = val_loss, 0
             best_state = {k: v.clone() for k, v in model.state_dict().items()}

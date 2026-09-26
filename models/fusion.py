@@ -113,8 +113,12 @@ def compare_models(y_true: np.ndarray, probs: dict[str, np.ndarray]) -> pd.DataF
 def run_fusion_pipeline(val_probs: dict[str, np.ndarray], val_y: np.ndarray,
                         test_probs: dict[str, np.ndarray], test_y: np.ndarray,
                         val_states: np.ndarray | None = None,
-                        test_states: np.ndarray | None = None) -> dict:
-    """完整融合流程：Stacking + 动态权重 + 对比表 + 落盘。"""
+                        test_states: np.ndarray | None = None,
+                        suffix: str = "") -> dict:
+    """完整融合流程：Stacking + 动态权重 + 对比表 + 落盘。
+
+    suffix: 输出文件名后缀（如 "_600519"），按股票区分避免多标的互相覆盖。
+    """
     fusion = StackingFusion().fit(val_probs, val_y)
     fused_prob = fusion.predict_proba(test_probs)
     fusion_metrics = eval_classification(test_y, fused_prob)
@@ -136,10 +140,13 @@ def run_fusion_pipeline(val_probs: dict[str, np.ndarray], val_y: np.ndarray,
         compare = pd.concat([compare, pd.DataFrame(
             [{"模型": "动态权重融合", "accuracy": dyn_metrics["accuracy"],
               "auc": dyn_metrics["auc"]}])], ignore_index=True)
-    compare.to_csv(RESULTS_DIR / "fusion_compare.csv", index=False)
+    compare.to_csv(RESULTS_DIR / f"fusion_compare{suffix}.csv", index=False)
     print(compare.to_string(index=False))
 
     result = {"stacking": fusion_metrics, "dynamic": dyn_metrics,
               "weights": fusion.weights, "compare": compare.to_dict("records")}
-    save_json(result, RESULTS_DIR / "fusion_metrics.json")
+    # 顶层 accuracy/auc 便于看板直接展示（find_metrics 读取顶层字段）
+    result["accuracy"] = fusion_metrics["accuracy"]
+    result["auc"] = fusion_metrics["auc"]
+    save_json(result, RESULTS_DIR / f"fusion_metrics{suffix}.json")
     return result

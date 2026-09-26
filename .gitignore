@@ -7,6 +7,15 @@ models/*.pt
 models/*.json
 models/llm/
 results/*.md
+# 本地训练产物（带股票后缀的预测/指标/对比/状态/日志不进 git；
+# 云端需要时由 scripts/sync_cloud.py 显式 add -f 提交）
+results/*_predictions_*.csv
+results/*_metrics_*.json
+results/*_compare_*.csv
+results/training_*.json
+results/train_log_*.log
+results/train_queue.json
+results/.sync_state.json
 # 云端部署分支需要提交训练好的预测文件（预测 CSV 与指标 JSON）
 .DS_Store
 data/cache/*

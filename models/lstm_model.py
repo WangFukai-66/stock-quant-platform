@@ -37,7 +37,9 @@ def train_lstm(x_train: np.ndarray, y_train: np.ndarray,
                x_val: np.ndarray, y_val: np.ndarray,
                epochs: int = 50, batch_size: int = 32, lr: float = 1e-3,
                patience: int = 5, model_path: Path | None = None,
-               device: torch.device | None = None) -> LSTMClassifier:
+               device: torch.device | None = None,
+               progress_cb=None) -> LSTMClassifier:
+    """progress_cb(epoch, epochs)：每个 epoch 结束回调，用于外部进度展示。"""
     device = device or get_device()
     input_size = x_train.shape[2]
     model = LSTMClassifier(input_size).to(device)
@@ -73,6 +75,8 @@ def train_lstm(x_train: np.ndarray, y_train: np.ndarray,
         history["train_loss"].append(round(train_loss, 4))
         history["val_loss"].append(round(val_loss, 4))
 
+        if progress_cb is not None:
+            progress_cb(epoch, epochs)
         if val_loss < best_val:
             best_val, bad_epochs = val_loss, 0
             best_state = {k: v.clone() for k, v in model.state_dict().items()}

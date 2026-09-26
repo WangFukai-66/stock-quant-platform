@@ -1,7 +1,7 @@
 # 云端部署精简依赖（Streamlit Community Cloud / 云端服务器）
 # 说明：云端只运行看板推理，不训练模型，故无需 torch/transformers 等重依赖。
 # 本地训练请使用 main 分支的完整依赖。
-streamlit>=1.30.0
+streamlit>=1.37.0
 pandas>=2.0.0,<3.0
 numpy>=1.24.0
 plotly>=5.18.0
