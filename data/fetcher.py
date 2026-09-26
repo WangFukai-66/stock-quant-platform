@@ -297,8 +297,23 @@ def fetch_financial(symbol: str) -> dict[str, pd.DataFrame]:
     if result:
         _write_cache(path, pd.DataFrame({"kind": list(result.keys())}))
         for name, df in result.items():
-            df.to_parquet(_cache_path(f"financial_{name}", symbol), index=False)
+            _normalize_mixed_cols(df).to_parquet(_cache_path(f"financial_{name}", symbol), index=False)
     return result
+
+
+def _normalize_mixed_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """财报表混型列（字符串+NaN）归一化，避免 pyarrow 写缓存失败。
+
+    纯数值字符串列转数值；含非数值的 object 列 NaN 填空串后转 str。
+    """
+    for col in df.columns:
+        s = df[col]
+        if s.dtype == object:
+            try:
+                df[col] = pd.to_numeric(s)
+            except (ValueError, TypeError):
+                df[col] = s.fillna("").astype(str)
+    return df
 
 
 def _restore_financial(path: Path) -> dict[str, pd.DataFrame]:
