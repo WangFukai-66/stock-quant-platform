@@ -391,6 +391,37 @@ def fetch_news(symbol: str) -> pd.DataFrame:
     return df
 
 
+# ---------------------------------------------------------------- 股票列表 ----
+
+def fetch_stock_names() -> dict[str, str]:
+    """全市场 A 股代码 → 名称映射（用于看板输入校验与名称显示）。
+
+    接口失败返回空字典，调用方应退化为仅做格式校验。
+    """
+    path = _cache_path("stock_names", "all")
+    cached = _read_cache(path)
+    if cached is not None and "代码" in cached.columns:
+        return dict(zip(cached["代码"].astype(str).str.zfill(6), cached["名称"].astype(str)))
+
+    import akshare as ak
+    try:
+        raw = _retry(ak.stock_info_a_code_name, retries=1)
+    except Exception as exc:
+        logger.warning("股票列表接口失败(%s)，仅做格式校验", exc)
+        return {}
+    if raw is None or raw.empty:
+        return {}
+    df = pd.DataFrame(raw)
+    if "code" in df.columns and "name" in df.columns:
+        df = df.rename(columns={"code": "代码", "name": "名称"})
+    if "代码" not in df.columns or "名称" not in df.columns:
+        logger.warning("股票列表接口返回格式异常: %s", list(df.columns))
+        return {}
+    df["代码"] = df["代码"].astype(str).str.zfill(6)
+    _write_cache(path, df[["代码", "名称"]])
+    return dict(zip(df["代码"], df["名称"].astype(str)))
+
+
 # ---------------------------------------------------------------- 入口 ----
 
 def summary(df: pd.DataFrame | None) -> str:

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from alert.rules import generate_signals, latest_signals, position_advice
 from backtest.engine import BacktestEngine, BacktestConfig
-from data.fetcher import fetch_news
+from data.fetcher import fetch_news, fetch_stock_names
 from data.finance import get_financial_metrics
 from data.quote import get_history
 from factors.indicators import add_all_indicators
@@ -52,6 +54,12 @@ def load_financial(symbol: str):
     return get_financial_metrics(symbol)
 
 
+@st.cache_data(ttl=86400)
+def load_stock_names() -> dict:
+    """全市场股票代码→名称映射（用于输入校验与名称显示，失败返回空字典）。"""
+    return fetch_stock_names()
+
+
 @st.cache_data(ttl=3600)
 def load_signals(symbol: str, start: str):
     df = get_history(symbol, period="daily", start=start)
@@ -67,12 +75,36 @@ def load_prediction(path: str):
 
 
 def latest_prediction(symbol: str) -> pd.DataFrame | None:
-    """读取该标的最新预测（优先融合，其次 XGBoost/LSTM）。"""
-    for name in ("fusion_predictions.csv", "xgb_predictions.csv", "lstm_predictions.csv"):
-        pred = load_prediction(str(PROJECT_ROOT / "results" / name))
-        if pred is not None and not pred.empty:
-            return pred
+    """读取该标的最新预测（优先融合，其次 XGBoost/LSTM）。
+
+    预测文件带股票代码后缀（如 fusion_predictions_600519.csv）；
+    无后缀的旧版文件视为默认标的 600519 的预测，其他股票不读，避免张冠李戴。
+    """
+    for name in ("fusion", "xgb", "lstm"):
+        for suffix in (f"_{symbol}", "" if symbol == DEFAULT_SYMBOL else None):
+            if suffix is None:
+                continue
+            pred = load_prediction(str(PROJECT_ROOT / "results" / f"{name}_predictions{suffix}.csv"))
+            if pred is not None and not pred.empty:
+                return pred
     return None
+
+
+def find_metrics(symbol: str, name: str) -> dict | None:
+    """读取模型指标 JSON（优先带代码后缀的文件；无后缀旧版文件仅限默认标的）。"""
+    for suffix in (f"_{symbol}", "" if symbol == DEFAULT_SYMBOL else None):
+        if suffix is None:
+            continue
+        p = PROJECT_ROOT / "results" / f"{name}_metrics{suffix}.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def trained_hint(symbol: str) -> str:
+    """未训练标的的统一提示文案。"""
+    return (f"股票 {symbol} 暂无模型预测。当前已训练标的：{DEFAULT_SYMBOL} {DEFAULT_NAME}。"
+            f"本地训练命令：python -m scripts.train_all --symbol {symbol}")
 
 
 # ---------------------------------------------------------------- 图表 ----
@@ -120,9 +152,12 @@ def page_home(symbol: str, df: pd.DataFrame, pred: pd.DataFrame | None,
         c3.metric("次日上涨概率", f"{p_last*100:.1f}%",
                   "看涨" if p_last >= 0.55 else ("看跌" if p_last < 0.45 else "中性"))
     else:
-        c3.metric("次日上涨概率", "未训练", "运行 scripts/train_all.py")
+        c3.metric("次日上涨概率", "未训练")
     today_sig = len(latest_signals(df))
     c4.metric("今日预警信号", f"{today_sig} 条")
+
+    if pred is None or pred.empty:
+        st.caption(trained_hint(symbol))
 
     st.subheader("仓位建议")
     st.info(f"**{advice['建议仓位']}** — {advice['依据']}（买入 {advice.get('买入信号', 0)} / "
@@ -193,7 +228,7 @@ def page_predict(symbol: str):
     st.caption("XGBoost / LSTM / Transformer 融合引擎的次日涨跌概率")
     pred = latest_prediction(symbol)
     if pred is None:
-        st.warning("未找到预测文件。请先运行：`python scripts/train_all.py --symbol " + symbol + "`")
+        st.warning(trained_hint(symbol))
         return
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=pred["日期"], y=pred["预测概率"], name="上涨概率",
@@ -207,17 +242,15 @@ def page_predict(symbol: str):
     st.dataframe(pred.tail(30), width='stretch')
 
     # 各模型指标
-    import json
     st.subheader("模型指标")
     cols = st.columns(3)
-    for i, name in enumerate(("xgb_metrics.json", "lstm_metrics.json", "fusion_metrics.json")):
-        p = PROJECT_ROOT / "results" / name
-        if p.exists():
-            m = json.loads(p.read_text(encoding="utf-8"))
-            cols[i].markdown(f"**{name.replace('_metrics.json','').upper()}**  \n"
+    for i, name in enumerate(("xgb", "lstm", "fusion")):
+        m = find_metrics(symbol, name)
+        if m:
+            cols[i].markdown(f"**{name.upper()}**  \n"
                              f"accuracy={m.get('accuracy')}  \nauc={m.get('auc')}")
         else:
-            cols[i].markdown(f"**{name.replace('_metrics.json','').upper()}**  \n未训练")
+            cols[i].markdown(f"**{name.upper()}**  \n未训练")
 
 
 def page_backtest(symbol: str, threshold: float):
@@ -225,7 +258,7 @@ def page_backtest(symbol: str, threshold: float):
     st.caption("严格模拟 A 股规则：T+1、涨跌停不可成交、佣金万2.5、印花税卖出千1、滑点1分")
     pred = latest_prediction(symbol)
     if pred is None:
-        st.warning("未找到预测文件。请先运行训练脚本。")
+        st.warning(trained_hint(symbol))
         return
     ohlc = load_history(symbol, "daily", "qfq", "20150101")
     merged = ohlc.merge(pred[["日期", "预测概率"]], on="日期", how="inner")
@@ -284,12 +317,35 @@ def page_alert(symbol: str):
 
 def main():
     st.sidebar.title("A股量化回测与智能交易预警系统")
-    symbol = st.sidebar.text_input("股票代码", DEFAULT_SYMBOL)
+
+    # 股票代码校验（6 位数字）+ 名称显示（接口失败时仅做格式校验）
+    symbol = st.sidebar.text_input("股票代码", DEFAULT_SYMBOL).strip()
+    if not re.fullmatch(r"\d{6}", symbol):
+        st.sidebar.error("请输入 6 位数字股票代码，如 600519 贵州茅台")
+        st.stop()
+    names = load_stock_names()
+    if symbol in names:
+        st.sidebar.caption(f"**{names[symbol]}**")
+    elif names:
+        st.sidebar.error(f"股票代码 {symbol} 不存在，请检查后重新输入")
+        st.stop()
+
     period = st.sidebar.selectbox("行情周期", ["daily", "min5", "min15", "min30", "min60"])
     adjust = st.sidebar.selectbox("复权方式", ["qfq", "hfq", ""], format_func=lambda x: x or "不复权")
     start = st.sidebar.date_input("起始日期", value=pd.to_datetime("2015-01-01")).strftime("%Y%m%d")
     threshold = st.sidebar.slider("回测买入概率阈值", 0.50, 0.80, 0.55, 0.01)
-    use_deep = st.sidebar.checkbox("舆情深度情绪模型（RoBERTa，首次加载较慢）", value=False)
+
+    # 云端（1GB 内存）禁用 RoBERTa 深度情绪模型，避免下载 400MB 模型导致 OOM
+    # （新版 Streamlit 在无 secrets.toml 时会抛异常，需防御）
+    try:
+        deep_disabled = bool(st.secrets.get("DISABLE_DEEP_MODEL", False))
+    except Exception:
+        deep_disabled = False
+    if deep_disabled:
+        st.sidebar.caption("云端环境已禁用深度情绪模型（内存限制），自动使用规则词典打分")
+        use_deep = False
+    else:
+        use_deep = st.sidebar.checkbox("舆情深度情绪模型（RoBERTa，首次加载较慢）", value=False)
 
     page = st.sidebar.radio("功能页签", ["概览", "行情", "财报", "舆情", "AI预测", "量化回测", "智能预警"])
 
