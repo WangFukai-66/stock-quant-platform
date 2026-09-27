@@ -14,7 +14,8 @@ _TEAM = [
         "name": "庞景文",
         "role": "数据分析 / 前端",
         "duty": "负责多源异构数据的采集、清洗与预处理，构建高价值特征工程体系，挖掘数据规律并输出可视化分析报告。",
-        "skill": "熟悉 Pandas/NumPy 数据处理与网络爬虫开发。",
+        "skill": "熟悉 Pandas/NumPy 进行高效数据处理与统计分析，掌握网络爬虫开发及多源异构数据采集合成；"
+                 "熟练使用 Matplotlib/Seaborn/Tableau/ECharts 等工具完成数据可视化与前端交互展示。",
     },
 ]
 
@@ -87,10 +88,17 @@ def page_about():
     )
 
     st.subheader("团队介绍")
-    c1, c2 = st.columns(2)
-    for col, m in zip((c1, c2), _TEAM):
-        col.markdown(f"#### {m['name']}　·　{m['role']}\n\n"
-                     f"**核心职责**：{m['duty']}\n\n**专业技能**：{m['skill']}")
+    # 标题 / 核心职责 / 专业技能分三行两列渲染：每行高度取两者最大值，
+    # 保证两列对应段落从同一水平线开始（标题折行也不再互相错位）
+    h1, h2 = st.columns(2)
+    r1, r2 = st.columns(2)
+    s1, s2 = st.columns(2)
+    for col, m in zip((h1, h2), _TEAM):
+        col.markdown(f"#### {m['name']}　·　{m['role']}")
+    for col, m in zip((r1, r2), _TEAM):
+        col.markdown(f"**核心职责**：{m['duty']}")
+    for col, m in zip((s1, s2), _TEAM):
+        col.markdown(f"**专业技能**：{m['skill']}")
 
     st.divider()
     st.caption("“多元技能互补，以技术为核心驱动力，打造高效、稳健、可扩展的智能解决方案团队。”")
