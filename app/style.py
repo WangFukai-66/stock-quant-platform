@@ -81,6 +81,12 @@ h3 { letter-spacing: 0.01em; }
 }
 ::-webkit-scrollbar-thumb:hover { background: #e64545; }
 
+/* ---------- 页面切换：重跑期间保持旧内容可见，避免整页淡白闪烁 ---------- */
+[data-stale="true"],
+.stale-element {
+    opacity: 1 !important;
+}
+
 /* ---------- 品牌横幅：白底 + 红色渐变点缀 ---------- */
 .cy-hero {
     display: flex;
@@ -121,6 +127,10 @@ h3 { letter-spacing: 0.01em; }
 .cy-pill-gold  { color: #b45309; border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.10); }
 </style>
 """
+
+
+# Plotly 图表统一配置：滚轮 / 触控板 / 触屏双指缩放 + 隐藏 plotly 图标
+PLOTLY_CONFIG = {"scrollZoom": True, "displaylogo": False}
 
 
 def inject_style() -> None:

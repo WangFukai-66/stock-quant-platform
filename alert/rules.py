@@ -37,50 +37,68 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     out["量比"] = out["成交量"] / out["成交量"].shift(1).rolling(5, min_periods=1).mean()
     out["涨跌幅"] = out["收盘"].pct_change() * 100
 
-    signals = []
-    for i in range(1, len(out)):
-        row = out.iloc[i]
-        prev = out.iloc[i - 1]
-        date = row["日期"]
-        close = float(row["收盘"])
-        prev_close = float(prev["收盘"])
-        pct = float(row["涨跌幅"]) if pd.notna(row["涨跌幅"]) else 0.0
+    # 全序列条件一次性预计算（原实现每轮循环重复计算全序列，复杂度 O(n²)，此处降为 O(n)）
+    cross_up_l = _cross_up(out["MA5"], out["MA20"]).tolist()
+    cross_down_l = _cross_down(out["MA5"], out["MA20"]).tolist()
+    vol_surge_l = (out["量比"] > 2).tolist()
+    dates = out["日期"].tolist()
+    close_l = out["收盘"].tolist()
+    ma5_l = out["MA5"].tolist()
+    ma20_l = out["MA20"].tolist()
+    vol_ratio_l = out["量比"].tolist()
+    dif_l = out["MACD_DIF"].tolist()
+    pct_l = out["涨跌幅"].fillna(0.0).tolist()
+    # 20 日窗口（含当日共 21 行）极值：等价于旧实现 out.iloc[i-20:i+1] 的 max/min
+    close_max21_l = out["收盘"].rolling(21).max().tolist()
+    close_min21_l = out["收盘"].rolling(21).min().tolist()
+    dif_max21_l = out["MACD_DIF"].rolling(21).max().tolist()
+    dif_min21_l = out["MACD_DIF"].rolling(21).min().tolist()
 
-        def add(sig_type: str, direction: str, note: str, action: str):
-            signals.append({
-                "日期": date, "类型": sig_type, "方向": direction,
-                "触发价": round(close, 2), "说明": note, "操作建议": action,
-            })
+    signals: list[dict] = []
+
+    def add(date, sig_type: str, direction: str, close: float, note: str, action: str):
+        signals.append({
+            "日期": date, "类型": sig_type, "方向": direction,
+            "触发价": round(close, 2), "说明": note, "操作建议": action,
+        })
+
+    for i in range(1, len(out)):
+        date = dates[i]
+        close = close_l[i]
+        pct = pct_l[i]
 
         # 均线金叉/死叉
-        if _cross_up(out["MA5"], out["MA20"]).iloc[i]:
-            add(GOLDEN_CROSS, "买入", f"MA5({row['MA5']:.2f}) 上穿 MA20({row['MA20']:.2f})", "可建仓")
-        if _cross_down(out["MA5"], out["MA20"]).iloc[i]:
-            add(DEATH_CROSS, "卖出", f"MA5({row['MA5']:.2f}) 下穿 MA20({row['MA20']:.2f})", "可减仓")
+        if cross_up_l[i]:
+            add(date, GOLDEN_CROSS, "买入", close,
+                f"MA5({ma5_l[i]:.2f}) 上穿 MA20({ma20_l[i]:.2f})", "可建仓")
+        if cross_down_l[i]:
+            add(date, DEATH_CROSS, "卖出", close,
+                f"MA5({ma5_l[i]:.2f}) 下穿 MA20({ma20_l[i]:.2f})", "可减仓")
 
         # 涨跌停触板（±10% 主板）
         if pct >= 9.9:
-            add(LIMIT_UP, "风险", "触及涨停板，追高需谨慎", "不追高")
+            add(date, LIMIT_UP, "风险", close, "触及涨停板，追高需谨慎", "不追高")
         if pct <= -9.9:
-            add(LIMIT_DOWN, "风险", "触及跌停板，注意流动性风险", "不抄底")
+            add(date, LIMIT_DOWN, "风险", close, "触及跌停板，注意流动性风险", "不抄底")
 
         # 放量异动
-        if row["量比"] > 2:
+        if vol_surge_l[i]:
             direction = "买入" if pct > 0 else "卖出"
-            add(VOLUME_SURGE, direction, f"量比 {row['量比']:.1f}（>2）且涨跌 {pct:.2f}%", "重点观察")
+            add(date, VOLUME_SURGE, direction, close,
+                f"量比 {vol_ratio_l[i]:.1f}（>2）且涨跌 {pct:.2f}%", "重点观察")
 
         # MACD 背离（近 20 日简化判断：价创新高/新低但 DIF 未同步）
         if i >= 20:
-            win = out.iloc[i - 20:i + 1]
-            if row["收盘"] == win["收盘"].max() and row["MACD_DIF"] < win["MACD_DIF"].max():
-                add(MACD_BEAR_DIV, "卖出", "价格创 20 日新高但 MACD 未创新高", "警惕回调")
-            if row["收盘"] == win["收盘"].min() and row["MACD_DIF"] > win["MACD_DIF"].min():
-                add(MACD_BULL_DIV, "买入", "价格创 20 日新低但 MACD 未创新低", "关注反弹")
+            if close == close_max21_l[i] and dif_l[i] < dif_max21_l[i]:
+                add(date, MACD_BEAR_DIV, "卖出", close, "价格创 20 日新高但 MACD 未创新高", "警惕回调")
+            if close == close_min21_l[i] and dif_l[i] > dif_min21_l[i]:
+                add(date, MACD_BULL_DIV, "买入", close, "价格创 20 日新低但 MACD 未创新低", "关注反弹")
 
-        # 回撤预警：从近 20 日高点回撤超 10%
-        high20 = out["收盘"].iloc[i - 20:i + 1].max()
+        # 回撤预警：从近 20 日高点回撤超 10%（窗口不足 21 行时为 NaN，不触发，与旧实现一致）
+        high20 = close_max21_l[i]
         if high20 > 0 and (high20 - close) / high20 >= 0.10:
-            add(DRAWDOWN_ALERT, "风险", f"自 20 日高点 {high20:.2f} 回撤 {(high20-close)/high20*100:.1f}%", "控制仓位")
+            add(date, DRAWDOWN_ALERT, "风险", close,
+                f"自 20 日高点 {high20:.2f} 回撤 {(high20-close)/high20*100:.1f}%", "控制仓位")
 
     return pd.DataFrame(signals)
 

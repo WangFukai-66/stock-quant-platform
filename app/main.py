@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from alert.rules import generate_signals, latest_signals, position_advice
 from app.about import page_about
 from app.components import STATE_NAMES, kline_with_signals, market_state
-from app.style import hero, inject_style
+from app.style import inject_style, PLOTLY_CONFIG
 from backtest.benchmark import buy_hold_equity, excess_metrics, index_equity
 from backtest.engine import BacktestEngine, BacktestConfig
 from data.fetcher import fetch_index_daily, fetch_news
@@ -100,13 +100,34 @@ def load_sentiment(symbol: str) -> float | None:
     return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_today_signals(symbol: str, start: str) -> pd.DataFrame:
+    """最新一日的全部信号（缓存版，避免每次页面切换重算全量信号）。"""
+    return latest_signals(get_history(symbol, period="daily", start=start))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_advice(symbol: str) -> dict:
+    """仓位建议（基于近三年日线，口径与 position_advice 原调用一致）。"""
+    return position_advice(get_history(symbol, period="daily", start="20230101"))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_scored_news(symbol: str, use_deep: bool):
+    """新闻情绪打分与日度聚合（缓存版；无新闻返回 (None, None)）。"""
+    news = load_news(symbol)
+    if news is None or news.empty:
+        return None, None
+    return analyze_news(news, use_deep=use_deep)
+
+
 @st.cache_data(ttl=86400)
 def load_index_equity(start: str = "20150101"):
     """沪深300 归一化净值曲线（接口失败降级为 None）。"""
     return index_equity("sh000300", start=start)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def load_market_overview() -> list[dict]:
     """上证/深证成指/创业板指/沪深300 最新收盘与涨跌幅（接口失败逐个跳过）。"""
     items = [("sh000001", "上证指数"), ("sz399001", "深证成指"),
@@ -138,7 +159,7 @@ def market_strip():
     st.caption("市场指数 · akshare 数据源（本地缓存 7 天）")
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def threshold_sensitivity(symbol: str) -> pd.DataFrame:
     """回测买入阈值敏感度（参数快速寻优展示）：0.50~0.70 步长 0.02。"""
     pred = latest_prediction(symbol)
@@ -354,11 +375,15 @@ def drive_queue() -> dict | None:
 
 
 def on_queue_done(q: dict) -> bool:
-    """队列完成时清预测缓存并请求整页刷新（幂等，返回是否需要 rerun）。"""
+    """队列完成时清预测及派生缓存并请求整页刷新（幂等，返回是否需要 rerun）。"""
     qid = q.get("started_at")
     if st.session_state.get("_cleared_queue") == qid:
         return False
     load_prediction.clear()
+    load_backtest.clear()
+    load_today_signals.clear()
+    load_advice.clear()
+    threshold_sensitivity.clear()
     st.session_state["_cleared_queue"] = qid
     return True
 
@@ -433,7 +458,7 @@ def kline_fig(df: pd.DataFrame, title: str = "K线图") -> go.Figure:
 # ---------------------------------------------------------------- 页签 ----
 
 def page_home(symbol: str, df: pd.DataFrame, pred: pd.DataFrame | None,
-              signals: pd.DataFrame, advice: dict):
+              signals: pd.DataFrame, advice: dict, start: str):
     st.header("概览")
     market_strip()
     last = df.iloc[-1]
@@ -449,7 +474,7 @@ def page_home(symbol: str, df: pd.DataFrame, pred: pd.DataFrame | None,
                   "看涨" if p_last >= 0.55 else ("看跌" if p_last < 0.45 else "中性"))
     else:
         c3.metric("次日上涨概率", "未训练")
-    today_sig = len(latest_signals(df))
+    today_sig = len(load_today_signals(symbol, start))
     c4.metric("今日预警信号", f"{today_sig} 条")
 
     # 风险与情绪监控指标卡
@@ -478,15 +503,44 @@ def page_home(symbol: str, df: pd.DataFrame, pred: pd.DataFrame | None,
             f"卖出 {advice.get('卖出信号', 0)} / 风险 {advice.get('风险信号', 0)}）")
 
     st.subheader("近 120 日走势与信号")
-    st.plotly_chart(kline_with_signals(df, signals, days=120, title=f"{symbol} 近120日"), width='stretch')
+    st.plotly_chart(kline_with_signals(df, signals, days=120, title=f"{symbol} 近120日"),
+                    width='stretch', config=PLOTLY_CONFIG)
 
 
 def page_quote(df: pd.DataFrame):
     st.header("行情看板")
-    st.plotly_chart(kline_fig(df), width='stretch')
+    st.plotly_chart(kline_fig(df), width='stretch', config=PLOTLY_CONFIG)
     with st.expander("原始数据（近 30 行）"):
         st.dataframe(df.tail(30), width='stretch')
     _vision_section(df)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_pattern_result(df: pd.DataFrame) -> dict:
+    """K线形态识别结果（近 60 日渲染 + CNN 概率），整包缓存避免每次切换重算。
+
+    返回 status: no_deps(视觉依赖缺失) / no_model(权重未训练) /
+    no_torch(推理依赖缺失) / error(推理失败) / ok(含 img 与 probs)。
+    """
+    try:
+        from vision.render import PATTERNS, render_candlestick
+    except Exception as exc:  # 云端无 matplotlib/PIL 依赖
+        return {"status": "no_deps", "detail": type(exc).__name__}
+    img = render_candlestick(df.tail(60))
+    weight_path = PROJECT_ROOT / "models" / "pattern_cnn.pt"
+    if not weight_path.exists():
+        return {"status": "no_model", "img": img}
+    try:
+        from vision.cnn_pattern import load_pattern_cnn, predict_pattern_probs
+    except Exception as exc:  # 云端禁用 torch
+        return {"status": "no_torch", "detail": type(exc).__name__}
+    try:
+        model = load_pattern_cnn(weight_path)
+        probs = predict_pattern_probs(model, [img])[0]
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+    return {"status": "ok", "img": img, "patterns": list(PATTERNS),
+            "probs": [float(p) for p in probs]}
 
 
 def _vision_section(df: pd.DataFrame):
@@ -494,36 +548,29 @@ def _vision_section(df: pd.DataFrame):
     with st.expander("K线形态识别（CNN）", expanded=False):
         st.caption("ResNet18 微调识别 5 类 K 线形态（头肩顶/双底/上升三角/箱体/突破），"
                    "作为融合引擎的第 4 路信号（合成数据训练，结论仅供研究参考）")
-        try:
-            from vision.render import PATTERNS, render_candlestick
-        except Exception as exc:  # 云端无 matplotlib/PIL 依赖
-            st.info(f"当前环境未安装视觉渲染依赖（{type(exc).__name__}），跳过形态识别展示。")
+        res = load_pattern_result(df)
+        status = res["status"]
+        if status == "no_deps":
+            st.info(f"当前环境未安装视觉渲染依赖（{res['detail']}），跳过形态识别展示。")
             return
-        img = render_candlestick(df.tail(60))
-        weight_path = PROJECT_ROOT / "models" / "pattern_cnn.pt"
-        if not weight_path.exists():
+        if status == "no_model":
             col1, col2 = st.columns([1, 2])
-            col1.image(img, caption="近60日标准化K线渲染", width=160)
+            col1.image(res["img"], caption="近60日标准化K线渲染", width=160)
             col2.warning("形态识别模型未训练。本地训练命令：`python -m vision.cnn_pattern`")
             return
-        try:
-            from vision.cnn_pattern import load_pattern_cnn, predict_pattern_probs
-        except Exception as exc:  # 云端禁用 torch
-            st.info(f"当前环境未安装 torch 推理依赖（{type(exc).__name__}），无法加载形态模型。")
+        if status == "no_torch":
+            st.info(f"当前环境未安装 torch 推理依赖（{res['detail']}），无法加载形态模型。")
             return
-        try:
-            model = load_pattern_cnn(weight_path)
-            probs = predict_pattern_probs(model, [img])[0]
-        except Exception as exc:
-            st.warning(f"形态识别推理失败：{exc}")
+        if status == "error":
+            st.warning(f"形态识别推理失败：{res['detail']}")
             return
-        top = sorted(zip(PATTERNS, probs), key=lambda x: -x[1])
+        top = sorted(zip(res["patterns"], res["probs"]), key=lambda x: -x[1])
         col1, col2 = st.columns([1, 2])
-        col1.image(img, caption="近60日标准化K线渲染", width=160)
+        col1.image(res["img"], caption="近60日标准化K线渲染", width=160)
         fig = go.Figure(go.Bar(x=[t for t, _ in top], y=[p * 100 for _, p in top],
                                marker_color="#3b82f6"))
         fig.update_layout(height=280, title="形态概率 Top5", yaxis_title="概率%")
-        col2.plotly_chart(fig, width='stretch')
+        col2.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
 
 def page_finance(symbol: str):
@@ -540,16 +587,15 @@ def page_finance(symbol: str):
         for c in cols:
             fig.add_trace(go.Scatter(x=show["日期"], y=show[c], name=c, mode="lines+markers"))
         fig.update_layout(height=400, title="盈利能力趋势")
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
 
 def page_news(symbol: str, use_deep: bool):
     st.header("舆情监控")
-    news = load_news(symbol)
-    if news is None or news.empty:
+    scored, daily = load_scored_news(symbol, use_deep)
+    if scored is None or daily is None:
         st.warning("暂无新闻数据")
         return
-    scored, daily = analyze_news(news, use_deep=use_deep)
     mode = "深度模型(RoBERTa)" if use_deep else "规则词典"
     st.caption(f"情绪分析模式：{mode}")
 
@@ -572,7 +618,7 @@ def page_news(symbol: str, use_deep: bool):
         fig.add_trace(go.Scatter(x=daily["日期"], y=daily["情绪均值"], name="情绪均值",
                                  line=dict(color="red")), secondary_y=True)
         fig.update_layout(height=350)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
 
 def page_predict(symbol: str):
@@ -590,7 +636,7 @@ def page_predict(symbol: str):
     fig.add_hline(y=0.55, line_dash="dot", line_color="orange",
                   annotation_text="买入阈值 0.55")
     fig.update_layout(height=400, title="预测概率走势（测试集）")
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
     st.dataframe(pred.tail(30), width='stretch')
     st.download_button("下载预测数据 CSV", pred.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"prediction_{symbol}.csv", key=f"dl_pred_{symbol}")
@@ -627,7 +673,7 @@ def page_predict(symbol: str):
         fig.add_trace(go.Scatter(x=comp["模型"], y=comp["auc"], name="auc",
                                  mode="lines+markers", line=dict(color="#ef4444")), secondary_y=True)
         fig.update_layout(height=350, yaxis_title="accuracy", yaxis2_title="auc")
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
     else:
         st.caption("暂无融合对比数据（本地训练后生成 fusion_metrics.json）")
 
@@ -640,7 +686,7 @@ def page_predict(symbol: str):
         counts = [int((states == s).sum()) for s in sorted(states.unique())]
         pie = go.Figure(go.Pie(labels=names, values=counts, hole=0.45))
         pie.update_layout(height=300, title="测试期市场状态分布")
-        c1.plotly_chart(pie, width='stretch')
+        c1.plotly_chart(pie, width='stretch', config=PLOTLY_CONFIG)
     else:
         c1.caption("预测文件无收盘序列，无法计算市场状态")
     if fusion_json and fusion_json.get("weights"):
@@ -648,7 +694,7 @@ def page_predict(symbol: str):
         bar = go.Figure(go.Bar(x=list(w.keys()), y=[v * 100 for v in w.values()],
                                marker_color=["#3b82f6", "#8b5cf6", "#f59e0b"]))
         bar.update_layout(height=300, title="Stacking 元学习器权重", yaxis_title="权重%")
-        c2.plotly_chart(bar, width='stretch')
+        c2.plotly_chart(bar, width='stretch', config=PLOTLY_CONFIG)
     else:
         c2.caption("暂无元学习器权重数据")
     c3.markdown(
@@ -691,30 +737,52 @@ def metrics_from_pred(symbol: str, name: str) -> dict | None:
     return {"accuracy": acc, "auc": auc}
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_backtest(symbol: str, threshold: float):
+    """回测 + 基准对比（引擎/买入持有/沪深300/超额指标）整包缓存。
+
+    返回 {"error": "no_pred"} / {"error": "no_overlap"} 或完整结果包。
+    """
+    pred = latest_prediction(symbol)
+    if pred is None:
+        return {"error": "no_pred"}
+    ohlc = get_history(symbol, period="daily", adjust="qfq", start="20150101")
+    merged = ohlc.merge(pred[["日期", "预测概率"]], on="日期", how="inner")
+    if merged.empty:
+        return {"error": "no_overlap"}
+    cfg = BacktestConfig(threshold=threshold)
+    result = BacktestEngine(cfg).run(merged, merged["预测概率"])
+    bh = buy_hold_equity(merged, cfg.initial_cash)
+    idx = load_index_equity()
+    return {
+        "metrics": result.metrics,
+        "equity": result.equity,
+        "drawdown": result.drawdown,
+        "trades": result.trades,
+        "bh": bh,
+        "idx": idx,
+        "ex_bh": excess_metrics(result.equity, bh),
+        "ex_idx": excess_metrics(result.equity, idx) if idx is not None else {},
+    }
+
+
 def page_backtest(symbol: str, threshold: float):
     st.header("量化回测")
     st.caption("严格模拟 A 股规则：T+1、涨跌停不可成交、佣金万2.5、印花税卖出千1、滑点1分；"
                "基准对比：标的买入持有 + 沪深300 指数")
-    pred = latest_prediction(symbol)
-    if pred is None:
+    bundle = load_backtest(symbol, threshold)
+    if bundle.get("error") == "no_pred":
         st.warning(trained_hint(symbol))
         return
-    ohlc = load_history(symbol, "daily", "qfq", "20150101")
-    merged = ohlc.merge(pred[["日期", "预测概率"]], on="日期", how="inner")
-    if merged.empty:
+    if bundle.get("error") == "no_overlap":
         st.warning("预测与行情日期无交集")
         return
 
-    cfg = BacktestConfig(threshold=threshold)
-    result = BacktestEngine(cfg).run(merged, merged["预测概率"])
-
-    # 基准：标的买入持有 + 沪深300（接口失败降级）
-    bh = buy_hold_equity(merged, cfg.initial_cash)
-    idx = load_index_equity()
-    ex_bh = excess_metrics(result.equity, bh)
-    ex_idx = excess_metrics(result.equity, idx) if idx is not None else {}
-
-    m = result.metrics
+    m = bundle["metrics"]
+    equity, drawdown = bundle["equity"], bundle["drawdown"]
+    bh, idx = bundle["bh"], bundle["idx"]
+    ex_bh, ex_idx = bundle["ex_bh"], bundle["ex_idx"]
+    trades = bundle["trades"]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("总收益率", f"{m['总收益率']}%")
     c2.metric("年化收益率", f"{m['年化收益率']}%")
@@ -732,8 +800,8 @@ def page_backtest(symbol: str, threshold: float):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.7, 0.3], vertical_spacing=0.05,
                         subplot_titles=("策略 vs 基准（归一化净值）", "回撤"))
-    fig.add_trace(go.Scatter(x=result.equity.index,
-                             y=result.equity.values / result.equity.values[0],
+    fig.add_trace(go.Scatter(x=equity.index,
+                             y=equity.values / equity.values[0],
                              name="策略", line=dict(color="#2563eb", width=2)), row=1, col=1)
     if not bh.empty:
         fig.add_trace(go.Scatter(x=bh.index, y=bh.values / bh.values[0],
@@ -741,16 +809,16 @@ def page_backtest(symbol: str, threshold: float):
     if idx is not None and not idx.empty:
         fig.add_trace(go.Scatter(x=idx.index, y=idx.values,
                                  name="沪深300", line=dict(color="#f59e0b", width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=result.drawdown.index, y=result.drawdown.values * 100,
+    fig.add_trace(go.Scatter(x=drawdown.index, y=drawdown.values * 100,
                              name="回撤%", line=dict(color="#dc2626"), fill="tozeroy"), row=2, col=1)
     fig.update_layout(height=550, xaxis_rangeslider_visible=False,
                       legend=dict(orientation="h"))
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
-    if result.trades is not None and not result.trades.empty:
+    if trades is not None and not trades.empty:
         st.subheader("交易明细")
         st.caption("收益率未计手续费与滑点，仅供展示参考")
-        trades_full = _enrich_trades(result.trades)
+        trades_full = _enrich_trades(trades)
         st.dataframe(trades_full.tail(30), width='stretch')
         st.download_button("下载交易明细 CSV", trades_full.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"trades_{symbol}.csv", key=f"dl_trades_{symbol}")
@@ -771,7 +839,7 @@ def page_backtest(symbol: str, threshold: float):
                        secondary_y=True)
         fig2.update_layout(height=320, xaxis_title="买入概率阈值",
                            yaxis_title="总收益率%", yaxis2_title="夏普比率")
-        st.plotly_chart(fig2, width='stretch')
+        st.plotly_chart(fig2, width='stretch', config=PLOTLY_CONFIG)
 
 
 def _enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
@@ -793,11 +861,11 @@ def _enrich_trades(trades: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def page_alert(symbol: str, daily_df: pd.DataFrame):
+def page_alert(symbol: str, daily_df: pd.DataFrame, start: str):
     st.header("智能预警")
     st.caption("规则引擎基于当日收盘数据触发信号（次日可执行）；演示版在页面内模拟推送，不接任何实盘通道")
     sig = load_signals(symbol, "20230101")
-    advice = position_advice(get_history(symbol, period="daily", start="20230101"))
+    advice = load_advice(symbol)
 
     st.subheader("当前仓位建议")
     c1, c2 = st.columns([3, 1])
@@ -821,7 +889,7 @@ def page_alert(symbol: str, daily_df: pd.DataFrame):
     r3.metric("距20日高点回撤", f"{dd20:.1f}%",
               "超10%触发回撤预警" if dd20 >= 10 else None,
               delta_color="inverse")
-    r4.metric("今日信号", f"{len(latest_signals(daily_df))} 条")
+    r4.metric("今日信号", f"{len(load_today_signals(symbol, start))} 条")
 
     if sig is None or sig.empty:
         st.info("近一年无触发信号")
@@ -834,7 +902,8 @@ def page_alert(symbol: str, daily_df: pd.DataFrame):
 
         st.subheader("近 120 日信号标注")
         st.plotly_chart(kline_with_signals(daily_df, sig, days=120,
-                                           title=f"{symbol} K线与预警信号"), width='stretch')
+                                           title=f"{symbol} K线与预警信号"),
+                        width='stretch', config=PLOTLY_CONFIG)
 
         st.subheader("最近信号")
         st.dataframe(sig.tail(30), width='stretch')
@@ -1041,7 +1110,6 @@ def main():
         sidebar_training_widget()
         return
 
-    hero()
     sidebar_training_widget()
 
     if page == "项目介绍":
@@ -1056,12 +1124,12 @@ def main():
 
     pred = latest_prediction(symbol)
     if page in ("概览", "智能预警"):
-        advice = position_advice(get_history(symbol, period="daily", start="20230101"))
+        advice = load_advice(symbol)
     else:
         advice = {}
 
     if page == "概览":
-        page_home(symbol, daily_df, pred, load_signals(symbol, "20230101"), advice)
+        page_home(symbol, daily_df, pred, load_signals(symbol, "20230101"), advice, start)
     elif page == "行情":
         df = load_history(symbol, period, adjust, start)
         if period == "daily":
@@ -1076,7 +1144,7 @@ def main():
     elif page == "量化回测":
         page_backtest(symbol, threshold)
     elif page == "智能预警":
-        page_alert(symbol, daily_df)
+        page_alert(symbol, daily_df, start)
 
 
 if __name__ == "__main__":
