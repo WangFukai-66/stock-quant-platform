@@ -87,7 +87,10 @@ def main() -> None:
     msg = f"sync: 更新股票预测 {','.join(symbols)} ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
     r = _run(["git", "commit", "-m", msg], PROJECT_ROOT)
     if r.returncode != 0:
-        _fail("git commit 失败：" + (r.stderr or r.stdout), step="commit")
+        # 预测内容与云端已提交版本一致（如重跑训练结果相同，仅 mtime 变化）时
+        # 无内容可提交，属正常情况，继续推送代码并刷新同步状态
+        if "nothing to commit" not in r.stdout + r.stderr:
+            _fail("git commit 失败：" + (r.stderr or r.stdout), step="commit")
     r = _run(["git", "push", "origin", "cloud"], PROJECT_ROOT)
     if r.returncode != 0:
         _fail("git push 失败：" + (r.stderr or r.stdout), step="push")
