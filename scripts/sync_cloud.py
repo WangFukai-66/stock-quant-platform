@@ -29,7 +29,10 @@ _EXT = {"predictions": ".csv", "metrics": ".json"}
 
 def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     """固定 cwd、无 shell 的子进程调用，输出全量捕获。"""
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    # stdin 显式指向 DEVNULL：看板以子进程方式启动本脚本时，父进程 stdin
+    # 可能是无效 fd，Python 3.13+ 会因 init_sys_streams 直接崩溃（Bad file descriptor）
+    return subprocess.run(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True)
 
 
 def _fail(msg: str, **extra) -> None:

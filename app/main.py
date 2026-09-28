@@ -309,7 +309,8 @@ def start_training(symbol: str, quick: bool) -> dict:
             [py, "-m", "scripts.train_all", "--symbol", symbol,
              "--status", str(status_path_of(symbol)),
              *(["--quick"] if quick else [])],
-            cwd=str(PROJECT_ROOT), stdout=f, stderr=subprocess.STDOUT)
+            cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
+            stdout=f, stderr=subprocess.STDOUT)
     return {"ok": True, "pid": proc.pid}
 
 
@@ -983,7 +984,8 @@ def page_admin():
                 with st.spinner("执行安全同步中（add → commit → push）..."):
                     r = subprocess.run(
                         [sys.executable, "-m", "scripts.sync_cloud", ",".join(pending)],
-                        cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=300)
+                        cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, timeout=300)
                 try:
                     res = json.loads(r.stdout.strip().splitlines()[-1])
                 except Exception:
