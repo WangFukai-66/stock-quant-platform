@@ -25,7 +25,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from alert.rules import generate_signals, latest_signals, position_advice
-from app.about import page_about
 from app.components import STATE_NAMES, kline_with_signals, market_state
 from app.style import inject_style, PLOTLY_CONFIG
 from backtest.benchmark import buy_hold_equity, excess_metrics, index_equity
@@ -1095,7 +1094,7 @@ def main():
     else:
         use_deep = st.sidebar.checkbox("舆情深度情绪模型（RoBERTa，首次加载较慢）", value=False)
 
-    pages = ["项目介绍", "概览", "行情", "财报", "舆情", "AI预测", "量化回测", "智能预警"]
+    pages = ["概览", "行情", "财报", "舆情", "AI预测", "量化回测", "智能预警"]
     if train_available():
         pages.append("后台管理")
     page = st.sidebar.radio("功能页签", pages)
@@ -1113,10 +1112,6 @@ def main():
         return
 
     sidebar_training_widget()
-
-    if page == "项目介绍":
-        page_about()
-        return
 
     with st.spinner("加载数据中..."):
         daily_df = load_indicators(symbol, start)
